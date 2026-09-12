@@ -1,0 +1,66 @@
+# Debug pod: verify that the node mounts are actually visible inside the
+# container. Prints diagnostics and then sleeps.
+#
+#   kubectl apply -f debug-mounts.yaml
+#   kubectl logs debug-mounts
+apiVersion: v1
+kind: Pod
+metadata:
+  name: debug-mounts
+spec:
+  nodeName: worker1
+  restartPolicy: Never
+  containers:
+    - name: debug
+      image: docker.io/library/kubewarden:0.9
+      imagePullPolicy: IfNotPresent
+      command:
+        - /bin/sh
+        - -c
+        - |
+          echo "=== uname -r (node kernel) ==="
+          uname -r
+          echo
+          echo "=== /lib/modules ==="
+          ls -la /lib/modules/ 2>&1 | head
+          echo
+          echo "=== build symlink ==="
+          ls -la /lib/modules/$(uname -r)/build 2>&1
+          echo
+          echo "=== /usr/src ==="
+          ls -la /usr/src/ 2>&1 | head
+          echo
+          echo "=== target header directory ==="
+          ls /usr/src/linux-headers-$(uname -r)/ 2>&1 | head
+          echo
+          echo "=== BTF ==="
+          ls -la /sys/kernel/btf/vmlinux 2>&1
+          echo
+          echo "=== kheaders (CONFIG_IKHEADERS) ==="
+          ls -la /sys/kernel/kheaders.tar.xz 2>&1
+          echo
+          sleep 3600
+      securityContext:
+        privileged: true
+      volumeMounts:
+        - name: modules
+          mountPath: /lib/modules
+          readOnly: true
+        - name: src
+          mountPath: /usr/src
+          readOnly: true
+        - name: debugfs
+          mountPath: /sys/kernel/debug
+  volumes:
+    - name: modules
+      hostPath:
+        path: /lib/modules
+        type: Directory
+    - name: src
+      hostPath:
+        path: /usr/src
+        type: Directory
+    - name: debugfs
+      hostPath:
+        path: /sys/kernel/debug
+        type: Directory

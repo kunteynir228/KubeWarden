@@ -1,0 +1,31 @@
+# Test for the "kernel module loading" vector.
+#
+# IMPORTANT: there is NO privileged here — exactly one capability was
+# added. That is the lesson: the pod looks "unprivileged", passes many
+# policy checks, and yet can load a kernel module and take full control
+# of the node's kernel — including unloading KubeWarden itself.
+#
+# Common misconception: CAP_SYS_ADMIN grants module loading. It does not
+# — you need CAP_SYS_MODULE specifically. privileged: true, on the other
+# hand, grants every capability at once, including this one.
+#
+#   kubectl apply -f attacker-module.yaml
+#   kubectl exec -it attacker-module -- bash
+#   # check the capability is there (capsh may be missing, then use /proc):
+#   grep Cap /proc/self/status
+#   # attempt to load (the file may not exist — the syscall is still
+#   # made and still caught):
+#   touch /tmp/evil.ko && insmod /tmp/evil.ko
+apiVersion: v1
+kind: Pod
+metadata:
+  name: attacker-module
+spec:
+  nodeName: worker1
+  containers:
+    - name: attacker
+      image: nicolaka/netshoot
+      command: ["sleep", "3600"]
+      securityContext:
+        capabilities:
+          add: ["SYS_MODULE"]

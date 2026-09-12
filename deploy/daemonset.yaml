@@ -1,0 +1,195 @@
+# KubeWarden DaemonSet — one agent per node.
+#
+# Why a DaemonSet specifically: the eBPF program runs in the kernel of a
+# SPECIFIC node and only sees that node's syscalls. A Deployment with
+# replicas would not work — it would spread pods arbitrarily and some
+# nodes would be left without an agent. A DaemonSet guarantees "exactly
+# one pod on every node".
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubewarden-policies
+  namespace: kubewarden-system
+data:
+  policies.yaml: |
+    thresholds:
+      warn: 40
+      kill: 90
+
+    # Full exclusion — events never leave the kernel.
+    exclude_namespaces:
+      - kubewarden-system
+
+    # Detection happens, automatic killing does not.
+    # kube-system is here by default: a false kill of coredns/cilium
+    # takes the cluster down. On control-plane nodes this also covers
+    # the static pods (etcd, kube-apiserver, kube-controller-manager).
+    warn_only_namespaces:
+      - kube-system
+      # Image scanners read a lot of files and talk to the runtime
+      # socket — a behaviour profile close to an attacker's. On a live
+      # cluster Trivy was killed falsely until the path matching was
+      # fixed.
+      - trivy-system
+      # Runtime-security agents mount the host filesystem under /host
+      # and read system paths — indistinguishable from an attacker.
+      # Falco was killed for reading /host/usr/src/ (kernel headers).
+      - falco
+      - monitoring
+      - observability
+
+    # Repeat escalation: a single detection in production is probably
+    # noise, but a third within 10 minutes is not. Counting is per pod
+    # owner (Deployment/DaemonSet) rather than per pod: after a kill the
+    # controller creates a new pod, so a per-cgroup counter would always
+    # read 1.
+    #   action: alert — escalate the alert, do not kill
+    #   action: kill  — kill even in warn_only (enable deliberately)
+    repeat_escalation:
+      enabled: true
+      window_minutes: 10
+      threshold: 3
+      action: alert
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kubewarden
+  namespace: kubewarden-system
+  labels:
+    app: kubewarden
+spec:
+  selector:
+    matchLabels:
+      app: kubewarden
+  template:
+    metadata:
+      labels:
+        app: kubewarden
+      annotations:
+        # Annotations for a Prometheus using a standard
+        # kubernetes_sd_config. With Prometheus Operator you need a
+        # ServiceMonitor instead (see deploy/servicemonitor.yaml).
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9102"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: kubewarden
+
+      # Required to see PIDs in the host namespace: eBPF reports host
+      # PIDs, and without hostPID the agent could not match them.
+      hostPID: true
+
+      # Deployment onto control-plane nodes. COMMENTED OUT for now:
+      # we are only running this on workers. Uncomment once the agent
+      # has run without false positives and you want to cover the
+      # control-plane node too (see the "Control plane" section in
+      # DEPLOY.md for why static pods in kube-system fall under
+      # warn_only).
+      # tolerations:
+      #   - key: node-role.kubernetes.io/control-plane
+      #     operator: Exists
+      #     effect: NoSchedule
+
+      containers:
+        - name: agent
+          image: kubewarden:0.9        # replace with your registry
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--in-cluster"
+            - "--enforce"
+            # - "--kernel-enforce"     # enable DELIBERATELY: kills in-kernel
+            - "--sync-interval=5"
+
+          securityContext:
+            # TODO: replace with targeted capabilities.
+            # In theory CAP_BPF + CAP_PERFMON + CAP_SYS_RESOURCE should
+            # be enough for bcc (kernel 5.8+), but writing to
+            # /sys/fs/cgroup for cgroup.kill still requires privileges
+            # in the host user namespace. privileged for now, and this
+            # is a deliberate trade-off rather than an oversight:
+            # security agents (Falco, Tetragon) are deployed the same
+            # way.
+            privileged: true
+
+          ports:
+            - name: metrics
+              containerPort: 9102
+              protocol: TCP
+
+          # /healthz is served by the same HTTP server as the metrics.
+          # If it stops answering, the agent has hung and the pod should
+          # be restarted.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9102
+            initialDelaySeconds: 60    # eBPF compilation through LLVM is slow
+            periodSeconds: 30
+            failureThreshold: 3
+
+          env:
+            # The node name is needed by PodResolver for the
+            # list_pods(field_selector=spec.nodeName=...) filter
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+
+          volumeMounts:
+            # tracefs — this is where the tracepoints the probes attach
+            # to live
+            - name: debugfs
+              mountPath: /sys/kernel/debug
+
+            # cgroupfs — WRITE access is mandatory: we write "1" into
+            # cgroup.kill to instantly kill every process in a pod. With
+            # readOnly the agent degrades to the slow API-delete
+            # (5-30 seconds).
+            - name: cgroupfs
+              mountPath: /sys/fs/cgroup
+
+            # Kernel headers, for compiling eBPF against the HOST
+            # kernel. bcc compiles on the fly through LLVM, and the
+            # header version must match the node's `uname -r`.
+            - name: modules
+              mountPath: /lib/modules
+              readOnly: true
+            - name: src
+              mountPath: /usr/src
+              readOnly: true
+
+            - name: policies
+              mountPath: /opt/kubewarden/policies
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              # LLVM consumes a noticeable amount of memory while
+              # compiling eBPF — a limit below ~512Mi leads to
+              # OOMKilled at startup
+              memory: 512Mi
+
+      volumes:
+        - name: debugfs
+          hostPath:
+            path: /sys/kernel/debug
+            type: Directory
+        - name: cgroupfs
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
+        - name: modules
+          hostPath:
+            path: /lib/modules
+            type: Directory
+        - name: src
+          hostPath:
+            path: /usr/src
+            type: Directory
+        - name: policies
+          configMap:
+            name: kubewarden-policies

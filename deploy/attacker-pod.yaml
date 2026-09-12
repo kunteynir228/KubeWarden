@@ -1,0 +1,25 @@
+# Test pod for checking KubeWarden's escape sensors.
+# netshoot ships mount, nsenter, unshare and gdb (ptrace) — the whole
+# toolkit.
+#
+# namespace default => full enforcement (not warn_only), so the pod will
+# actually be killed on an escape. hostPID + privileged => /proc/1 leads
+# to the host and both mount and setns are available.
+#
+# Pinned to worker1 so the tracer on that node can see it.
+#
+#   kubectl apply -f attacker-pod.yaml
+#   kubectl exec -it attacker -- bash
+apiVersion: v1
+kind: Pod
+metadata:
+  name: attacker
+spec:
+  nodeName: worker1
+  hostPID: true
+  containers:
+    - name: attacker
+      image: nicolaka/netshoot
+      command: ["sleep", "3600"]
+      securityContext:
+        privileged: true

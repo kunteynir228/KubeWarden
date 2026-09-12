@@ -1,0 +1,60 @@
+# Metrics collection for KubeWarden.
+#
+# Two options — apply ONLY ONE of them:
+#
+# 1. If Prometheus is configured with kubernetes_sd_config and
+#    annotations (a plain installation with a hand-written
+#    prometheus.yml), there is nothing to apply from this file: the
+#    prometheus.io/scrape annotations are already on the DaemonSet pods
+#    and Prometheus will pick them up on its own.
+#
+# 2. If you run Prometheus Operator (kube-prometheus-stack), apply this
+#    file as a whole: the Operator ignores annotations and needs a
+#    ServiceMonitor.
+#
+#   kubectl apply -f deploy/servicemonitor.yaml
+#
+# A headless Service (clusterIP: None) is required because the metrics
+# are per-node: a regular Service would load-balance requests between
+# pods, and Prometheus would see a random node instead of all of them.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubewarden-metrics
+  namespace: kubewarden-system
+  labels:
+    app: kubewarden
+spec:
+  clusterIP: None        # headless: every pod has to be reachable
+  selector:
+    app: kubewarden
+  ports:
+    - name: metrics
+      port: 9102
+      targetPort: metrics
+      protocol: TCP
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kubewarden
+  namespace: kubewarden-system
+  labels:
+    app: kubewarden
+    # A label is often required for the Operator to select this monitor.
+    # In kube-prometheus-stack the default is release=<release name>.
+    # Check with:
+    #   kubectl get prometheus -A -o yaml | grep -A5 serviceMonitorSelector
+    # release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app: kubewarden
+  namespaceSelector:
+    matchNames:
+      - kubewarden-system
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics

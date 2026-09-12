@@ -1,0 +1,86 @@
+# ============================================================================
+# KubeWarden — response policies
+# ============================================================================
+
+# threat_score thresholds. The score accumulates across a chain of events
+# from one container within a 30-second window and decays as events age
+# out of it (see CORRELATION_WINDOW_SEC in core/correlator.py).
+thresholds:
+  warn: 40   # log as suspicious; with --kernel-enforce, also arm the
+             # cgroup so the next chroot/mount/setns is killed in-kernel
+             # within microseconds
+  kill: 90   # kill the pod: cgroup.kill (instant) + API-delete + Event
+
+# ----------------------------------------------------------------------------
+# NAMESPACES: two levels of leniency. Both are up to the operator, because
+# only the cluster owner knows what counts as critical here.
+# ----------------------------------------------------------------------------
+
+# FULL EXCLUSION. Events from these namespaces are dropped in the KERNEL
+# and never even reach detection. This is a deliberate blind spot: if a
+# pod in such a namespace is compromised, KubeWarden will see nothing.
+#
+# The default is just the agent itself (otherwise it would react to its
+# own actions: our kill triggers volume cleanup, which looks like
+# suspicious activity).
+#
+# Add namespaces here when the noise outweighs the value of watching them.
+exclude_namespaces:
+  - kubewarden-system
+
+# OBSERVE WITHOUT AUTOMATIC KILL. Detection works, WARN/KILL are logged,
+# a Kubernetes Event is created — but the pod is not killed. A human
+# decides while triaging the alert.
+#
+# kube-system is here by default on purpose: a false positive on coredns,
+# cilium or kube-proxy would take the cluster down, and that is the worst
+# possible outcome for someone running the agent for the first time
+# without reading the docs. An attack on a privileged pod in kube-system
+# will still be visible.
+#
+# Remove a namespace from this list once you are confident there are no
+# false positives.
+warn_only_namespaces:
+  - kube-system
+  # Image scanners read a lot of files and talk to the runtime socket by
+  # the nature of their work — easy to mistake for an attack. On a live
+  # cluster Trivy was killed falsely (the "/host" rule matched
+  # "/etc/hosts"). The matching is fixed, but keeping scanners in
+  # warn_only is still sensible: their behaviour profile is the closest
+  # thing to an attacker's.
+  - trivy-system
+  # Runtime-security and observability agents mount the host filesystem
+  # under /host and read system paths from there — a profile
+  # indistinguishable from an attacker's. On a live cluster Falco was
+  # killed for reading /host/usr/src/ (kernel headers — exactly what
+  # KubeWarden itself reads).
+  - falco
+  - monitoring
+  - observability
+
+# ----------------------------------------------------------------------------
+# REPEAT ESCALATION — a third tier between "stay quiet" and "kill".
+#
+# The problem it solves: in production few people are willing to kill a pod
+# on a single detection — it is a running service, and the cost of a false
+# kill is higher than the cost of a delayed response. So production ends up
+# in warn_only.
+#
+# But then a signal is lost: one WARN is probably noise, while a third
+# detection within ten minutes is not. A legitimate application either does
+# something always or never.
+#
+# Counting is per pod OWNER (Deployment/DaemonSet/StatefulSet) rather than
+# per pod: after a kill the controller brings up a new pod with a new
+# cgroup_id, so a per-pod counter would always read 1.
+# ----------------------------------------------------------------------------
+repeat_escalation:
+  enabled: true
+  window_minutes: 10
+  threshold: 3        # this many KILL decisions in the window = escalation
+  # alert — raise the log level and tag the Event ("3rd detection within
+  #         8 min"), but do not kill. The on-call engineer has something
+  #         concrete to take to the service owner.
+  # kill  — kill even in a warn_only namespace. Enable deliberately:
+  #         this removes the kube-system protection on repeated activity.
+  action: alert

